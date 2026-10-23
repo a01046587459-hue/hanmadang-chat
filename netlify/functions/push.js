@@ -67,6 +67,7 @@ exports.handler = async (event) => {
     authBuf = b64uToBuf(keys.auth);
     privJwk = JSON.parse(d.vapidPrivJwk);
   } catch (e) { return json(400, 'bad key format: ' + String((e && e.message) || e).slice(0, 60)); }
+  if (!Buffer.isBuffer(subKey) || subKey.length < 65 || subKey[0] !== 0x04) return json(400, 'bad p256dh: len=' + (subKey ? subKey.length : 0) + ' first=' + (subKey ? subKey[0] : '-'));
   try {
     const body = encryptPayload(subKey, authBuf, payloadBytes);
     const jwt = makeVapidJwt(new URL(ep).origin, privJwk);

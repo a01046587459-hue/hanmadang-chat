@@ -14,7 +14,7 @@ exports.handler = async (event) => {
   try {
     const parsed = JSON.parse(event.body || '{}');
     if (!parsed || typeof parsed.b64 !== 'string') return json(400, 'no b64');
-    raw = Buffer.from(parsed.b64, 'base64');
+        raw = Buffer.from(parsed.b64.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
     if (!raw.length) return json(400, 'empty body');
   } catch (e) { return json(400, 'bad json: ' + String((e && e.message) || e).slice(0, 80)); }
   const H = event.headers || {};

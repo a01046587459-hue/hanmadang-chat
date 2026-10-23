@@ -10,7 +10,7 @@
   · 관리자: 승인/거절, 이름 교체, 메시지 삭제, 관리자 지정, 내보내기
   · 공유: 사진·파일·링크 + 위치(관리자에게만 보임 — DB 규칙으로 강제) · 동영상 업로드는 관리자 전용
   · 승인 요청 탭: 학생을 반 순서(자5A→자6D→중A→중H)로 정렬, 선생님 요청은 맨 아래
-  · 버전 3.11.6 — 중계 Content-Length 수동 설정 제거(바이너리 손상 차단)
+  · 버전 3.12.0 — 서버사이드 암호화 전환(바이너리 전달 제거)
   · 설정 순서는 앱 안의 "도움말" 버튼에 전부 들어 있습니다.
   ═══════════════════════════════════════════════════════════════
 -->
@@ -634,7 +634,7 @@ function showInstallCard(mode){
   c.hidden = false;
 }
 function hideInstallCard(){ const c = $('#installCard'); if(c) c.hidden = true; }
-const HMC_VER = '3.11.6';
+const HMC_VER = '3.12.0';
 /* ── 웹 푸시 (ntfy 없이 자체 푸시 — RFC 8291·8292 준수, 표준 테스트 벡터로 검증됨) ──
    수신: 서비스 워커(sw.js)가 푸시를 받아 시스템 알림 표시
    발신: 메시지를 보내는 기기가 승인된 사용자들의 구독에 직접 전송 (서버 불필요) */
@@ -775,49 +775,35 @@ async function webPushAll(kind, last){
       body: pushPreview(last) + ' (' + HMC_VER + ')',
       tag: 'hmc-msg', url: location.origin + location.pathname  /* 아이콘 제외 — FCM payload 4KB 한도 대응(v3.10.4). 알림 표시 아이콘은 브라우저가 앱 아이콘으로 대체 */
     };
-    const bytes = new TextEncoder().encode(JSON.stringify(payload));
+    const privJwk = VAPID_PRIV && typeof VAPID_PRIV === 'object' ? JSON.stringify(VAPID_PRIV) : null;
     let ok = 0, fail = 0, errN = 0, firstErr = '';
     await Promise.allSettled(subs.filter((x) => x.uid !== (ME && ME.uid)).map(async (x) => {
       const ep = x.sub && x.sub.endpoint, k = x.sub && x.sub.keys;
-      let origin = '';
-      try { origin = new URL(ep).origin; } catch(ue){ fail++; firstErr = firstErr || ('엔드포인트형태이상[' + String(ep || '').slice(0, 40) + ']'); return; }
       try {
         /* 주의: 키 접두어 검사를 넣지 마세요 — 유효 키는 B+다양한 문자(A~P)로 시작함 */
         if(!ep || !k || !k.p256dh || !k.auth){ fail++; firstErr = firstErr || '구독정보불완전(uid=' + (x.uid || '?') + ')'; return; }
-        const jwt = await getJwt(origin);
-        const body = await encryptPush({ keys: k }, bytes);
-        let res = null, viaRelay = false;
-        const hdrs = { TTL: '3600', Urgency: 'normal', 'Content-Encoding': 'aes128gcm', Authorization: 'vapid t=' + jwt + ', k=' + VAPID_PUB };
-        for(let att = 0; att < 2 && !res; att++){
-          try { res = await fetch(ep, { method: 'POST', headers: hdrs, body }); }
-          catch(fe){ await new Promise((r) => setTimeout(r, 600)); }
-        }
-        if(!res){
-          /* 브라우저 → 푸시서버는 CORS로 막히므로 Netlify 함수로 중계 재시도.
-             바이너리 손상을 막기 위해 암호화 본문을 base64 JSON으로 감싸 보낸다 */
-          try {
-            let b64 = '';
-            if(typeof body === 'string') b64 = btoa(body);
-            else { const u = new Uint8Array(body); let s = ''; for(let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); b64 = btoa(s); }
-            res = await fetch('/.netlify/functions/push?endpoint=' + encodeURIComponent(ep), { method: 'POST', headers: { 'Content-Type': 'application/json', TTL: '3600', Urgency: 'normal', Authorization: hdrs.Authorization }, body: JSON.stringify({ b64, ce: 'aes128gcm' }) });
-            viaRelay = true;
-          } catch(fe2){}
-        }
+        if(!privJwk){ fail++; firstErr = firstErr || 'VAPID개인키형태이상'; return; }
+        /* 서버사이드 암호화 전환: 평문 payload + 구독키 + VAPID키 전달, 암호화는 서버에서 */
+        const res = await fetch('/.netlify/functions/push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ endpoint: ep, keys: k, payload, vapidPrivJwk: privJwk, vapidPub: VAPID_PUB }) });
         if(res.ok) ok++;
-        else { fail++; let why = ''; try { why = (await res.text()).slice(0, 60); } catch(te){} firstErr = firstErr || ('HTTP ' + res.status + (viaRelay ? '[중계]' : '') + (why ? ':' + why : '')); }
+        else { fail++; let why = ''; try { why = (await res.text()).slice(0, 60); } catch(te){} firstErr = firstErr || ('HTTP ' + res.status + '[중계]' + (why ? ':' + why : '')); }
         if((res.status === 403 || res.status === 404 || res.status === 410) && ME && ME.isAdmin){ try { await BE.removePushSub(x.uid); } catch(e){} }
       } catch(pe){
         errN++;
         let host = '';
         try { host = new URL(ep).host; } catch(e){}
         const nm = ((pe && pe.name) || '') + ' ' + String((pe && pe.message) || pe || '');
-        const hint = /failed to fetch/i.test(nm) ? ' — 이 기기의 네트워크/DNS가 푸시서버를 막거나 CORS 차단' : '';
-        firstErr = firstErr || (nm.trim().slice(0, 40) + ' [' + (host || 'host?') + ' · 온라인=' + (navigator.onLine ? '예' : '아니오') + ']' + hint);
+        firstErr = firstErr || (nm.trim().slice(0, 40) + ' [' + (host || 'host?') + ' · 온라인=' + (navigator.onLine ? '예' : '아니오') + ']');
       }
     }));
-    const targets = subs.filter((x) => x.uid !== (ME && ME.uid)).length;
-    if(!ok && !fail && errN) return { ok, fail, err: errN, firstErr, why: null };
-    return { ok, fail, err: errN, firstErr, why: targets === 0 ? '자기자신뿐' : null };
+    if(false){ /* 제거된 구형 루프 */
+      const ep = null;
+      if(!ep || true){ }
+    }
+        if(res.ok) ok++;
+        else { fail++; let why = ''; try { why = (await res.text()).slice(0, 60); } catch(te){} firstErr = firstErr || ('HTTP ' + res.status + (viaRelay ? '[중계]' : '') + (why ? ':' + why : '')); }
+        if((res.status === 403 || res.status === 404 || res.status === 410) && ME && ME.isAdmin){ try { await BE.removePushSub(x.uid); } catch(e){} }
+
   } catch(e){ console.warn('push:', e); return { ok: 0, fail: 0, why: '오류:' + String((e && e.message) || e || '').slice(0, 40) }; }
 }
 async function webPushSelfTest(){
@@ -828,22 +814,10 @@ async function webPushSelfTest(){
     const sub = reg ? await reg.pushManager.getSubscription() : null;
     if(!sub) return toast('먼저 알림을 켜주세요', 'err');
     const payload = { title: '🔔 테스트 알림', body: '여기까지 오면 알림 설정 완료!', tag: 'hmc-test', url: location.origin + location.pathname };
-    const bytes = new TextEncoder().encode(JSON.stringify(payload));
-    const origin = new URL(sub.endpoint).origin;
-    const jwt = await getJwt(origin);
-    const body = await encryptPush(sub.toJSON(), bytes);
-    const hdrs = { TTL: '3600', Urgency: 'normal', 'Content-Encoding': 'aes128gcm', Authorization: 'vapid t=' + jwt + ', k=' + VAPID_PUB };
+    const privJwk = VAPID_PRIV && typeof VAPID_PRIV === 'object' ? JSON.stringify(VAPID_PRIV) : null;
+    if(!privJwk) return toast('VAPID 개인키 형태가 이상해요 — 관리자 기기에서 알림을 다시 켜주세요', 'err');
     let res = null;
-    try { res = await fetch(sub.endpoint, { method: 'POST', headers: hdrs, body }); } catch(fe){}
-    if(!res){
-      /* 브라우저 → FCM은 CORS로 직접 전송 불가 — 일반 발신과 동일하게 Netlify 중계로 재시도 */
-      try {
-        let b64 = '';
-        const u = body instanceof Uint8Array ? body : new Uint8Array(body);
-        for(let i = 0; i < u.length; i += 0x8000) b64 += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
-        res = await fetch('/.netlify/functions/push?endpoint=' + encodeURIComponent(sub.endpoint), { method: 'POST', headers: { 'Content-Type': 'application/json', TTL: '3600', Urgency: 'normal', Authorization: hdrs.Authorization }, body: JSON.stringify({ b64: btoa(b64), ce: 'aes128gcm' }) });
-      } catch(fe2){}
-    }
+    try { res = await fetch('/.netlify/functions/push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint, keys: sub.toJSON().keys, payload, vapidPrivJwk: privJwk, vapidPub: VAPID_PUB }) }); } catch(fe){}
     if(!res) return toast('테스트 실패: 네트워크가 전송을 막았어요 — 연결 확인 후 다시 시도해 주세요', 'err');
     if(res.ok) toast('테스트를 보냈어요 — 알림이 오는지 확인해 주세요 🔔', 'ok');
     else if(res.status === 403 || res.status === 404 || res.status === 410) toast('구독이 만료/불일치예요 — 알림을 껐다가 다시 켜주세요', 'err');

@@ -10,7 +10,7 @@
   · 관리자: 승인/거절, 이름 교체, 메시지 삭제, 관리자 지정, 내보내기
   · 공유: 사진·파일·링크 + 위치(관리자에게만 보임 — DB 규칙으로 강제) · 동영상 업로드는 관리자 전용
   · 승인 요청 탭: 학생을 반 순서(자5A→자6D→중A→중H)로 정렬, 선생님 요청은 맨 아래
-  · 버전 3.11.2 — SW 식별 태그(구형 SW 판별용)
+  · 버전 3.11.3 — 테스트 알림도 중계 경로 사용(CORS 수정)
   · 설정 순서는 앱 안의 "도움말" 버튼에 전부 들어 있습니다.
   ═══════════════════════════════════════════════════════════════
 -->
@@ -634,7 +634,7 @@ function showInstallCard(mode){
   c.hidden = false;
 }
 function hideInstallCard(){ const c = $('#installCard'); if(c) c.hidden = true; }
-const HMC_VER = '3.11.2';
+const HMC_VER = '3.11.3';
 /* ── 웹 푸시 (ntfy 없이 자체 푸시 — RFC 8291·8292 준수, 표준 테스트 벡터로 검증됨) ──
    수신: 서비스 워커(sw.js)가 푸시를 받아 시스템 알림 표시
    발신: 메시지를 보내는 기기가 승인된 사용자들의 구독에 직접 전송 (서버 불필요) */
@@ -832,10 +832,22 @@ async function webPushSelfTest(){
     const origin = new URL(sub.endpoint).origin;
     const jwt = await getJwt(origin);
     const body = await encryptPush(sub.toJSON(), bytes);
-    const res = await fetch(sub.endpoint, { method: 'POST', headers: { TTL: '3600', Urgency: 'normal', 'Content-Encoding': 'aes128gcm', Authorization: 'vapid t=' + jwt + ', k=' + VAPID_PUB }, body });
+    const hdrs = { TTL: '3600', Urgency: 'normal', 'Content-Encoding': 'aes128gcm', Authorization: 'vapid t=' + jwt + ', k=' + VAPID_PUB };
+    let res = null;
+    try { res = await fetch(sub.endpoint, { method: 'POST', headers: hdrs, body }); } catch(fe){}
+    if(!res){
+      /* 브라우저 → FCM은 CORS로 직접 전송 불가 — 일반 발신과 동일하게 Netlify 중계로 재시도 */
+      try {
+        let b64 = '';
+        const u = body instanceof Uint8Array ? body : new Uint8Array(body);
+        for(let i = 0; i < u.length; i += 0x8000) b64 += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+        res = await fetch('/.netlify/functions/push?endpoint=' + encodeURIComponent(sub.endpoint), { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: hdrs.Authorization }, body: JSON.stringify({ b64: btoa(b64), ce: 'aes128gcm' }) });
+      } catch(fe2){}
+    }
+    if(!res) return toast('테스트 실패: 네트워크가 전송을 막았어요 — 연결 확인 후 다시 시도해 주세요', 'err');
     if(res.ok) toast('테스트를 보냈어요 — 알림이 오는지 확인해 주세요 🔔', 'ok');
     else if(res.status === 403 || res.status === 404 || res.status === 410) toast('구독이 만료/불일치예요 — 알림을 껐다가 다시 켜주세요', 'err');
-    else toast('전송 실패 (' + res.status + ') — 잠시 후 다시 시도해 주세요', 'err');
+    else { let why = ''; try { why = (await res.text()).slice(0, 60); } catch(te){} toast('전송 실패 (' + res.status + (why ? ':' + why : '') + ') — 잠시 후 다시 시도해 주세요', 'err'); }
   } catch(e){ console.warn(e); toast('테스트 실패: ' + shortErr(e), 'err'); }
 }
 /* ═══════════════════════════════════════════════════════════

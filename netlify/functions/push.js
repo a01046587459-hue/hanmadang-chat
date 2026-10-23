@@ -21,6 +21,7 @@ exports.handler = async (event) => {
   const get = (k) => H[k] || H[k.toLowerCase()] || H[k.replace(/(^|-)(\w)/g, (m) => m.toUpperCase())] || '';
   const ttl = get('ttl'), urg = get('urgency'), enc = get('content-encoding'), auth = get('authorization');
   if (!auth) return json(400, 'missing authorization');
+  if (!ttl || isNaN(Number(ttl))) ttl = '3600';
   const fwd = { 'Content-Length': raw.length };
   if (ttl) fwd['TTL'] = ttl;
   if (urg) fwd['Urgency'] = urg;

@@ -22,7 +22,7 @@ exports.handler = async (event) => {
   const ttl = get('ttl'), urg = get('urgency'), enc = get('content-encoding'), auth = get('authorization');
   if (!auth) return json(400, 'missing authorization');
   if (!ttl || isNaN(Number(ttl))) ttl = '3600';
-  const fwd = { 'Content-Length': raw.length };
+  const fwd = {};
   if (ttl) fwd['TTL'] = ttl;
   if (urg) fwd['Urgency'] = urg;
   if (enc) fwd['Content-Encoding'] = enc;
